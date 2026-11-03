@@ -17,6 +17,7 @@ package org.springframework.data.mapping;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.springframework.data.mapping.PropertyPath.from;
+import static org.springframework.data.util.TypeDiscovererUnitTests.getSizesOfMapsHeldBy;
 
 import java.util.Iterator;
 import java.util.Map;
@@ -399,6 +400,26 @@ public class PropertyPathUnitTests {
 	@Test // DATACMNS-1304
 	public void detectsNestedSingleCharacterProperty() {
 		assertThat(from("category_B", Product.class).toDotPath()).isEqualTo("category.b");
+	}
+
+	@Test // GH-3500
+	public void doesNotRetainUnresolvablePropertyNames() {
+
+		TypeInformation<FooBar> type = ClassTypeInformation.from(FooBar.class);
+
+		assertThat(from("name", type).toDotPath()).isEqualTo("name");
+
+		Map<String, Integer> sizes = getSizesOfMapsHeldBy(type);
+
+		for (int i = 0; i < 1000; i++) {
+
+			String path = "unknownProperty" + i;
+
+			assertThatExceptionOfType(PropertyReferenceException.class) //
+					.isThrownBy(() -> from(path, type));
+		}
+
+		assertThat(getSizesOfMapsHeldBy(type)).isEqualTo(sizes);
 	}
 
 	private class Foo {

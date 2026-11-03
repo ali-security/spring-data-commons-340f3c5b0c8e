@@ -21,7 +21,6 @@ import lombok.RequiredArgsConstructor;
 
 import java.beans.PropertyDescriptor;
 import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
 import java.lang.reflect.GenericArrayType;
 import java.lang.reflect.Method;
 import java.lang.reflect.ParameterizedType;
@@ -29,7 +28,6 @@ import java.lang.reflect.Type;
 import java.lang.reflect.TypeVariable;
 import java.lang.reflect.WildcardType;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import org.springframework.beans.BeanUtils;
@@ -38,6 +36,8 @@ import org.springframework.lang.Nullable;
 import org.springframework.util.Assert;
 import org.springframework.util.ClassUtils;
 import org.springframework.util.ReflectionUtils;
+import org.springframework.util.ReflectionUtils.FieldCallback;
+import org.springframework.util.StringUtils;
 
 /**
  * Basic {@link TypeDiscoverer} that contains basic functionality to discover property types.
@@ -62,7 +62,7 @@ class TypeDiscoverer<S> implements TypeInformation<S> {
 
 	private final Type type;
 	private final Map<TypeVariable<?>, Type> typeVariableMap;
-	private final Map<String, Optional<TypeInformation<?>>> fieldTypes = new ConcurrentHashMap<>();
+	private final Lazy<Map<String, TypeInformation<?>>> fields;
 	private final int hashCode;
 
 	private final Lazy<Class<S>> resolvedType;
@@ -82,6 +82,7 @@ class TypeDiscoverer<S> implements TypeInformation<S> {
 
 		this.type = type;
 		this.resolvedType = Lazy.of(() -> resolveType(type));
+		this.fields = Lazy.of(this::doGetProperties);
 		this.componentType = Lazy.of(this::doGetComponentType);
 		this.valueType = Lazy.of(this::doGetMapValueType);
 		this.typeVariableMap = typeVariableMap;
@@ -194,7 +195,7 @@ class TypeDiscoverer<S> implements TypeInformation<S> {
 		int separatorIndex = fieldname.indexOf('.');
 
 		if (separatorIndex == -1) {
-			return fieldTypes.computeIfAbsent(fieldname, this::getPropertyInformation).orElse(null);
+			return fields.get().get(fieldname);
 		}
 
 		String head = fieldname.substring(0, separatorIndex);
@@ -208,48 +209,72 @@ class TypeDiscoverer<S> implements TypeInformation<S> {
 	}
 
 	/**
-	 * Returns the {@link TypeInformation} for the given atomic field. Will inspect fields first and return the type of a
-	 * field if available. Otherwise it will fall back to a {@link PropertyDescriptor}.
+	 * Returns the {@link TypeInformation} for all atomic properties of the current type. Will inspect fields first and
+	 * use the type of a field if available, the field declared closest to the current type in the class hierarchy
+	 * winning. Otherwise it will fall back to {@link PropertyDescriptor}s. All properties are computed at once so that
+	 * lookups for arbitrary property names do not let the resulting {@link Map} grow.
 	 *
 	 * @see #getGenericType(PropertyDescriptor)
-	 * @param fieldname
-	 * @return
+	 * @return will never be {@literal null}.
 	 */
-	@SuppressWarnings("null")
-	private Optional<TypeInformation<?>> getPropertyInformation(String fieldname) {
+	private Map<String, TypeInformation<?>> doGetProperties() {
 
+		Map<String, TypeInformation<?>> result = new HashMap<>();
 		Class<?> rawType = getType();
-		Field field = ReflectionUtils.findField(rawType, fieldname);
+		FieldCallback callback = field -> {
+			if (!result.containsKey(field.getName())) {
+				result.put(field.getName(), createInfo(field.getGenericType()));
+			}
+		};
 
-		if (field != null) {
-			return Optional.of(createInfo(field.getGenericType()));
-		}
+		// Inspect fields first
+		ReflectionUtils.doWithFields(rawType, callback);
 
-		return findPropertyDescriptor(rawType, fieldname).map(it -> createInfo(getGenericType(it)));
+		// Also inspect property descriptors
+		addPropertyDescriptors(rawType, result, new HashSet<>());
+
+		return Collections.unmodifiableMap(result);
 	}
 
 	/**
-	 * Finds the {@link PropertyDescriptor} for the property with the given name on the given type.
+	 * Adds the {@link TypeInformation} for all {@link PropertyDescriptor}s of the given type not already contained in the
+	 * given {@link Map} and continues with the interfaces implemented by the given type. Also registers the capitalized
+	 * and uncapitalized variants of the property names to retain the lenient name matching of
+	 * {@link BeanUtils#getPropertyDescriptor(Class, String)}.
 	 *
 	 * @param type must not be {@literal null}.
-	 * @param fieldname must not be {@literal null} or empty.
-	 * @return
+	 * @param result must not be {@literal null}.
+	 * @param visited must not be {@literal null}.
 	 */
-	private static Optional<PropertyDescriptor> findPropertyDescriptor(Class<?> type, String fieldname) {
+	private void addPropertyDescriptors(Class<?> type, Map<String, TypeInformation<?>> result, Set<Class<?>> visited) {
 
-		PropertyDescriptor descriptor = BeanUtils.getPropertyDescriptor(type, fieldname);
-
-		if (descriptor != null) {
-			return Optional.of(descriptor);
+		if (!visited.add(type)) {
+			return;
 		}
 
-		List<Class<?>> superTypes = new ArrayList<>();
-		superTypes.addAll(Arrays.asList(type.getInterfaces()));
-		superTypes.add(type.getSuperclass());
+		Map<String, TypeInformation<?>> lenient = new HashMap<>();
 
-		return Streamable.of(type.getInterfaces()).stream()//
-				.flatMap(it -> Optionals.toStream(findPropertyDescriptor(it, fieldname)))//
-				.findFirst();
+		for (PropertyDescriptor descriptor : BeanUtils.getPropertyDescriptors(type)) {
+
+			Type genericType = getGenericType(descriptor);
+
+			if (genericType == null) {
+				continue;
+			}
+
+			String name = descriptor.getName();
+			TypeInformation<?> information = createInfo(genericType);
+
+			result.putIfAbsent(name, information);
+			lenient.putIfAbsent(StringUtils.uncapitalize(name), information);
+			lenient.putIfAbsent(StringUtils.capitalize(name), information);
+		}
+
+		lenient.forEach(result::putIfAbsent);
+
+		for (Class<?> candidate : type.getInterfaces()) {
+			addPropertyDescriptors(candidate, result, visited);
+		}
 	}
 
 	/**

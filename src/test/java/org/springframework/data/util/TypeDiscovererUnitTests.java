@@ -19,10 +19,12 @@ import static org.assertj.core.api.Assertions.*;
 import static org.springframework.data.util.ClassTypeInformation.from;
 
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.Type;
 import java.lang.reflect.TypeVariable;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -168,6 +170,73 @@ public class TypeDiscovererUnitTests {
 		assertThat(type.getRequiredProperty("streamable").isCollectionLike()).isTrue();
 	}
 
+	@Test // GH-3500
+	public void superclassFieldsDoNotHideSubclassFields() {
+
+		TypeDiscoverer<TheOne> discoverer = new TypeDiscoverer<>(TheOne.class, EMPTY_MAP);
+
+		assertThat(discoverer.getProperty("theOne").getType()).isEqualTo(String.class);
+		assertThat(discoverer.getProperty("theOther").getType()).isEqualTo(String.class);
+	}
+
+	@Test // GH-3500
+	public void doesNotRetainLookupsForUnknownProperties() {
+
+		TypeDiscoverer<Person> discoverer = new TypeDiscoverer<>(Person.class, EMPTY_MAP);
+
+		assertThat(discoverer.getProperty("addresses")).isNotNull();
+
+		Map<String, Integer> sizes = getSizesOfMapsHeldBy(discoverer);
+
+		for (int i = 0; i < 10000; i++) {
+			assertThat(discoverer.getProperty("unknown" + i)).isNull();
+		}
+
+		assertThat(getSizesOfMapsHeldBy(discoverer)).isEqualTo(sizes);
+	}
+
+	/**
+	 * Returns the sizes of all {@link Map}s (potentially wrapped into a {@link Lazy}) held in instance fields of the given
+	 * object.
+	 */
+	public static Map<String, Integer> getSizesOfMapsHeldBy(Object target) {
+
+		Map<String, Integer> sizes = new HashMap<>();
+
+		org.springframework.util.ReflectionUtils.doWithFields(target.getClass(), field -> {
+
+			org.springframework.util.ReflectionUtils.makeAccessible(field);
+			Object value = field.get(target);
+
+			if (value instanceof Lazy) {
+				value = ((Lazy<?>) value).orElse(null);
+			}
+
+			if (value instanceof Map) {
+				sizes.put(field.getName(), ((Map<?, ?>) value).size());
+			}
+
+		}, field -> !Modifier.isStatic(field.getModifiers()));
+
+		return sizes;
+	}
+
+	@Test // GH-3500
+	public void resolvesPropertiesFromAccessorsAndInterfaces() {
+
+		TypeInformation<AccessorsOnly> type = from(AccessorsOnly.class);
+
+		assertThat(type.getRequiredProperty("firstname").getType()).isEqualTo(String.class);
+		assertThat(type.getRequiredProperty("Firstname").getType()).isEqualTo(String.class);
+		assertThat(type.getRequiredProperty("lastname").getType()).isEqualTo(Locale.class);
+		assertThat(type.getProperty("Unknown")).isNull();
+
+		TypeInformation<ExtendedNamed> extended = from(ExtendedNamed.class);
+
+		assertThat(extended.getRequiredProperty("name").getType()).isEqualTo(String.class);
+		assertThat(extended.getRequiredProperty("nickname").getType()).isEqualTo(String.class);
+	}
+
 	class Person {
 
 		Addresses addresses;
@@ -216,5 +285,31 @@ public class TypeDiscovererUnitTests {
 		public Iterator<String> iterator() {
 			return Collections.emptyIterator();
 		}
+	}
+
+	// GH-3500
+
+	static class SuperclassWithProperties {
+		private CharSequence theOne;
+		private String theOther;
+	}
+
+	class TheOne extends SuperclassWithProperties {
+		private String theOne;
+	}
+
+	static abstract class AccessorsOnly {
+
+		public abstract String getFirstname();
+
+		public abstract void setLastname(Locale lastname);
+	}
+
+	interface Named {
+		String getName();
+	}
+
+	interface ExtendedNamed extends Named {
+		String getNickname();
 	}
 }
