@@ -387,6 +387,21 @@ public class PropertyPathUnitTests {
 				.isThrownBy(() -> PropertyPath.from(path, Left.class));
 	}
 
+	@Test // DATACMNS-1285, GH-3494
+	public void rejectsTooLongPropertyNameSplit() {
+
+		String source = "AaBbCcDdeEfFgGhHiIjJkKlL";
+
+		for (int i = 0; i < 9; i++) {
+			source += source;
+		}
+
+		final String path = source;
+
+		assertThatExceptionOfType(IllegalArgumentException.class) //
+				.isThrownBy(() -> PropertyPath.from(path, Left.class));
+	}
+
 	@Test // DATACMNS-1304
 	public void resolvesPropertyPathWithSingleUppercaseLetterPropertyEnding() {
 		assertThat(from("categoryB", Product.class).toDotPath()).isEqualTo("categoryB");
