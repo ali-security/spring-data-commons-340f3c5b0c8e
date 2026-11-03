@@ -1,0 +1,111 @@
+name: seal-build
+
+# Upstream spring-data-commons 2.1.x has no GitHub Actions CI; it builds on
+# Jenkins (Jenkinsfile, "test: baseline" stage: adoptopenjdk/openjdk8 +
+# `./mvnw clean dependency:list verify -Dsort -U -B`). This workflow mirrors
+# that stage on a GitHub runner with JDK 8 and Maven 3.6.3 (the Maven that
+# built the published 2.1.21.RELEASE jar).
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Surefire -Dtest selector; empty runs the full suite"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+
+      - name: Install Maven 3.6.3
+        run: |
+          curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.6.3/binaries/apache-maven-3.6.3-bin.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/apache-maven-3.6.3/bin" >> "$GITHUB_PATH"
+
+      - name: Maven settings (route retired repo.spring.io repositories to Maven Central)
+        run: |
+          cat > "$RUNNER_TEMP/settings.xml" <<'EOF'
+          <settings>
+            <mirrors>
+              <mirror>
+                <id>central-mirror</id>
+                <mirrorOf>*</mirrorOf>
+                <url>https://repo.maven.apache.org/maven2</url>
+              </mirror>
+            </mirrors>
+          </settings>
+          EOF
+
+      - name: Build and test
+        env:
+          MAVEN_OPTS: "-Duser.name=jenkins"
+        run: |
+          mvn -version
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            mvn -s "$RUNNER_TEMP/settings.xml" -B -e --no-transfer-progress clean verify -Dtest='${{ inputs.test-filter }}' -DfailIfNoTests=false
+          else
+            mvn -s "$RUNNER_TEMP/settings.xml" -B -e --no-transfer-progress clean dependency:list verify -Dsort
+          fi
+
+      - name: List skipped tests with reasons
+        if: always()
+        run: |
+          shopt -s nullglob
+          files=(target/surefire-reports/TEST-*.xml)
+          if [ ${#files[@]} -eq 0 ]; then echo "no surefire reports"; exit 0; fi
+          python3 - "${files[@]}" <<'EOF'
+          import os, re, sys, xml.etree.ElementTree as ET
+
+          def assumption(classname, name):
+              # JUnit 4 Assume failures carry no message in the surefire XML;
+              # print the assumption guard from the test source as the reason.
+              path = os.path.join("src/test/java", classname.split("$")[0].replace(".", "/") + ".java")
+              method = re.sub(r"\[.*$", "", name)
+              if not os.path.exists(path):
+                  return None
+              lines = open(path, encoding="utf-8").read().splitlines()
+              for i, line in enumerate(lines):
+                  if re.search(r"\bvoid\s+" + re.escape(method) + r"\s*\(", line):
+                      for body in lines[i + 1:i + 40]:
+                          if "@Test" in body:
+                              break
+                          if "assume" in body:
+                              return body.strip()
+              return None
+
+          total = run = fail = err = skip = 0
+          for f in sys.argv[1:]:
+              root = ET.parse(f).getroot()
+              for tc in root.iter("testcase"):
+                  total += 1
+                  s = tc.find("skipped")
+                  if s is not None:
+                      skip += 1
+                      msg = s.get("message") or (s.text or "").strip()
+                      if not msg:
+                          guard = assumption(tc.get("classname"), tc.get("name"))
+                          msg = f"JUnit assumption not met on this JDK/parameter: {guard}" if guard else "no message"
+                      print(f"SKIPPED: {tc.get('classname')}.{tc.get('name')} -- {msg}")
+                  elif tc.find("failure") is not None:
+                      fail += 1
+                  elif tc.find("error") is not None:
+                      err += 1
+          print(f"Surefire summary: {total} testcases, {total - skip - fail - err} passed, {fail} failures, {err} errors, {skip} skipped")
+          EOF
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spring-data-commons-jar
+          path: target/spring-data-commons-2.1.21.RELEASE.jar
+          if-no-files-found: error
