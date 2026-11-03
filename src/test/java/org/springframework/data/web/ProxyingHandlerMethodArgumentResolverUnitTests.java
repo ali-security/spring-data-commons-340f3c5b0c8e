@@ -22,13 +22,17 @@ import java.util.List;
 
 import org.junit.Test;
 import org.springframework.core.MethodParameter;
+import org.springframework.core.SpringProperties;
 import org.springframework.core.convert.support.DefaultConversionService;
 import org.springframework.data.web.ProjectingJackson2HttpMessageConverterUnitTests.SampleInterface;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.web.context.request.ServletWebRequest;
 
 /**
  * Unit tests for {@link ProxyingHandlerMethodArgumentResolver}.
  *
  * @author Oliver Gierke
+ * @author Christoph Strobl
  * @soundtrack Karlijn Langendijk & Sönke Meinen - Englishman In New York (Sting,
  *             https://www.youtube.com/watch?v=O7LZsqrnaaA)
  */
@@ -73,10 +77,57 @@ public class ProxyingHandlerMethodArgumentResolverUnitTests {
 		assertThat(resolver.supportsParameter(parameter)).isFalse();
 	}
 
+	@Test // GH-3495
+	public void bindsCollectionValuesWithinDefaultLimit() throws Exception {
+		assertThat(bindFooBar(resolver, 1023)).hasSize(1024);
+	}
+
+	@Test // GH-3495
+	public void doesNotGrowCollectionsBeyondDefaultLimitOnBinding() throws Exception {
+		assertThat(bindFooBar(resolver, 10_000_000)).isNullOrEmpty();
+	}
+
+	@Test // GH-3495
+	public void considersCollectionLimitConfiguredViaSpringProperties() throws Exception {
+
+		SpringProperties.setProperty(ProxyingHandlerMethodArgumentResolver.COLLECTION_SIZE_LIMIT_PARAM, "10");
+
+		try {
+
+			ProxyingHandlerMethodArgumentResolver customized = new ProxyingHandlerMethodArgumentResolver(
+					() -> new DefaultConversionService(), true);
+
+			assertThat(bindFooBar(customized, 9)).hasSize(10);
+			assertThat(bindFooBar(customized, 10)).isNullOrEmpty();
+
+		} finally {
+			SpringProperties.setProperty(ProxyingHandlerMethodArgumentResolver.COLLECTION_SIZE_LIMIT_PARAM, null);
+		}
+	}
+
+	private static List<String> bindFooBar(ProxyingHandlerMethodArgumentResolver resolver, int index)
+			throws Exception {
+
+		MethodParameter parameter = new MethodParameter(Controller.class.getMethod("with", CollectionPayload.class), 0);
+
+		MockHttpServletRequest request = new MockHttpServletRequest();
+		request.addParameter(String.format("fooBar[%s]", index), "Spring");
+
+		CollectionPayload payload = (CollectionPayload) resolver.createAttribute("payload", parameter, null,
+				new ServletWebRequest(request));
+
+		return payload.getFooBar();
+	}
+
 	@ProjectedPayload
 	interface AnnotatedInterface {}
 
 	interface UnannotatedInterface {}
+
+	@ProjectedPayload
+	interface CollectionPayload {
+		List<String> getFooBar();
+	}
 
 	interface Controller {
 
@@ -85,6 +136,8 @@ public class ProxyingHandlerMethodArgumentResolverUnitTests {
 		void with(UnannotatedInterface param);
 
 		void with(SampleInterface param);
+
+		void with(CollectionPayload param);
 
 		void with(List<Object> param);
 	}
